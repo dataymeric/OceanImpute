@@ -1,0 +1,13 @@
+matplotlib
+pandas
+numpy
+xarray[complete]
+torch
+torchvision
+einops
+tensordict
+wandb
+cmocean
+notebook
+ipywidgets
+rich
