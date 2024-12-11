@@ -39,7 +39,7 @@ if torch.cuda.is_available():
 logger.info(f"Using device: {device}")
 
 
-base_dir = "./"
+base_dir = "../"
 config = {
     "datasets": {
         "psc": f"{base_dir}/data/processed",

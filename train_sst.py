@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
@@ -35,33 +34,33 @@ if torch.cuda.is_available():
     device = torch.device("cuda")
     torch.cuda.empty_cache()
 
-base_dir = "./"
+base_dir = "../"
 config = {
     "datasets": {
-        "psc": f"{base_dir}/data/processed",
+        "pft": f"{base_dir}/data/processed",
         "sst": f"{base_dir}/data/SST",
         "clouds": f"{base_dir}/data/clouds.nc",
     },
     "checkpoints": {
         "save": True,
-        "path": f"{base_dir}/models/PSC",
+        "path": f"{base_dir}/models/SST",
     },
     "periods": {
         "train": 0.6,
         "test": 0.2,
         "val": 0.2,
     },
-    "time_window": 32,  # 8 days * 4 weeks
+    "time_window": 32,
     "model": {
-        "input_size": (32, 288, 288),
-        "in_channels": 4,  # number of variables
-        "out_channels": 4,
-        "patch_size": (8, 18, 18),  # 4 * 16 * 16 patches
+        "input_size": (32, 240, 240),
+        "in_channels": 1,  # number of variables
+        "out_channels": 1,
+        "patch_size": (8, 15, 15),  # 4 * 16 * 16 patches
         "hidden_size": 192,
         "depth": 12,
         "num_heads": 12,
         "mlp_ratio": 4.0,
-        "use_modulation": False,
+        "use_modulation": True,
     },
     "num_epochs": 200,
     "patience": 30,  # early stopping patience
@@ -71,18 +70,19 @@ config = {
 }
 
 DATE = datetime.now().strftime("%Y%m%d_%H%M%S")
-NAME = "transformer3d_psc"
+NAME = "transformer3d_sst"
 config["checkpoints"]["name"] = f"{DATE}_{NAME}"
 
 wandb.init(
-    project="imputation_psc",
+    project="imputation_sst",
     config=config,
     sync_tensorboard=True,
     name=NAME,
     group="Transformer3D",
     tags=[
-        "Min-Max",
-        "No conditioning",
+        "Deseasonalized",
+        "Min-Max",  # Min-Max, Z-Score, None
+        "No conditioning",  # AdaLN, Cross-Attention, No conditioning
         "MSE",
     ],
 )
@@ -92,36 +92,38 @@ logger.info(f"Using device: {device}")
 def run_epoch(
     model, loader, loss_fn, optimizer, device, mode="train", progress=None, task_id=None
 ):
-    if mode == "train":
-        model.train()
-    else:
-        model.eval()
-
+    model.train(mode == "train")
     total_loss = 0.0
-
     with torch.set_grad_enabled(mode == "train"):
-        for time, inputs, masks in loader:
-            inputs = inputs.to(device).float()  # B, 4, T, H, W
-            masks = masks.to(device).float()  # B, 4, T, H, W
+        for time, targets, masks in loader:
+            # Targets are fully observed
+            targets = targets.to(device).float()  # B, 1, T, H, W
+            masks = masks.to(device).float()  # B, 1, T, H, W
 
-            inputs_masked, new_masks = random_temporal_masking(
+            # Artificially mask the targets using our masks to simulate missing data
+            inputs = targets * (1 - masks)  # B, 1, T, H, W
+
+            # Apply spatial and temporal masking
+            inputs_masked, new_masks = random_spatial_masking(
                 inputs, masks, mask_ratio=0.2
             )
-            inputs_masked, new_masks = random_spatial_masking(
+            inputs_masked, new_masks = random_temporal_masking(
                 inputs_masked, new_masks, mask_ratio=0.2
             )
 
-            outputs = model(inputs_masked, new_masks)  # B, 4, T, H, W
+            # Forward pass
+            outputs = model(inputs_masked, new_masks)  # B, 1, T, H, W
 
-            chl = outputs[:, 0, ...].unsqueeze(1)  # B, 1, T, H, W
-            psc = outputs[:, 1:, ...]  # B, 3, T, H, W
-            psc = F.softmax(psc, dim=1)  # ensure the sum of probabilities is 1
-            outputs = torch.cat([chl, psc], dim=1)  # B, 4, T, H, W
-
-            loss = loss_fn(inputs, outputs, (1 - masks))
+            if mode == "train":
+                # Compute loss between the observed values
+                loss = loss_fn(inputs, outputs, (1 - masks))
+            else:
+                # Compute loss on the whole sequence (to assess reconstruction during evaluation)
+                loss = torch.sqrt(F.mse_loss(targets, outputs))
 
             total_loss += loss.item()
 
+            # Backward pass
             if mode == "train":
                 optimizer.zero_grad()
                 loss.backward()
@@ -132,13 +134,14 @@ def run_epoch(
 
     avg_loss = total_loss / len(loader)
 
-    return avg_loss, inputs_masked, inputs, outputs, time
+    return avg_loss, inputs, inputs_masked, targets, outputs, time
 
 
 def log_images(
     writer,
-    inputs_masked,
     inputs,
+    inputs_masked,
+    targets,
     outputs,
     time,
     epoch,
@@ -148,17 +151,16 @@ def log_images(
 ):
     """Logs figures to TensorBoard."""
     if epoch % log_interval == 0:
+        # inputs[masks.bool()] = np.nan
         for data, label in zip(
-            [inputs_masked, inputs, outputs], ["Masked", "Inputs", "Outputs"]
+            [inputs, inputs_masked, targets, outputs],
+            ["Inputs", "Masked", "Targets", "Outputs"],
         ):
-            for i, var in enumerate(["Chl-a", "Micro", "Nano", "Pico"]):
-                writer.add_figure(
-                    f"{label}/{mode}/{var}",
-                    create_grid_from_3d_batch(
-                        data[:, i, ...].unsqueeze(1), time, **kwargs
-                    ),
-                    epoch + 1,
-                )
+            writer.add_figure(
+                f"{label}/{mode}/SST",
+                create_grid_from_3d_batch(data, time, **kwargs),
+                epoch + 1,
+            )
 
 
 def main(
@@ -219,7 +221,7 @@ def main(
                 *last_train_data,
                 epoch,
                 mode="train",
-                cmap="jet",
+                cmap="seismic",
                 use_log_scale=False,
                 vrange=(0, 1),
             )
@@ -244,7 +246,7 @@ def main(
                 *last_val_data,
                 epoch,
                 mode="val",
-                cmap="jet",
+                cmap="seismic",
                 use_log_scale=False,
                 vrange=(0, 1),
             )
@@ -286,13 +288,13 @@ def main(
             task_id=test_task,
         )
 
-        progress.console.print(f"Test MSE: {avg_mse:.6f}")
+        progress.console.print(f"Test RMSE: {avg_mse:.6f}")
         log_images(
             writer,
             *last_test_data,
             epoch,
             mode="test",
-            cmap="jet",
+            cmap="seismic",
             use_log_scale=False,
             vrange=(0, 1),
         )
@@ -302,13 +304,16 @@ if __name__ == "__main__":
     # Load the dataset
     logger.info("Loading dataset...")
     ds = xr.open_mfdataset(
-        f"{config['datasets']['psc']}/*.nc",
+        f"{config['datasets']['sst']}/*.nc",
         engine="h5netcdf",
     )
-    ds["Chl"] = np.log10(ds["Chl"])  # log-transform Chl-a
-    ds["Micro"] = ds["Micro"] / 100
-    ds["Pico"] = ds["Pico"] / 100
-    ds["Nano"] = ds["Nano"] / 100
+
+    clouds = xr.open_dataset(config["datasets"]["clouds"], engine="h5netcdf")
+    clouds = clouds.sel(time=slice("1998", "2016"))
+    clouds = clouds.interp(lon=ds.longitude, lat=ds.latitude, method="nearest")
+    logger.info(clouds)
+
+    ds = ds.sel(time=clouds.time)
     logger.info(ds)
 
     logger.info("Preprocessing dataset...")
@@ -316,45 +321,60 @@ if __name__ == "__main__":
         ds, config["periods"]
     )
 
-    stats = {
-        "min": train_ds["Chl"].min(dim="time"),
-        "max": train_ds["Chl"].max(dim="time"),
-    }
+    stats = {"daily_climatology": train_ds.groupby("time.dayofyear").mean("time")}
 
-    train_ds["Chl"] = preprocessing.minmax_normalize(
-        train_ds["Chl"], stats["min"], stats["max"]
+    train_ds = preprocessing.remove_seasonality(
+        train_ds, stats["daily_climatology"], group="dayofyear"
     )
-    val_ds["Chl"] = preprocessing.minmax_normalize(
-        val_ds["Chl"], stats["min"], stats["max"]
+    val_ds = preprocessing.remove_seasonality(
+        val_ds, stats["daily_climatology"], group="dayofyear"
     )
-    test_ds["Chl"] = preprocessing.minmax_normalize(
-        test_ds["Chl"], stats["min"], stats["max"]
+    test_ds = preprocessing.remove_seasonality(
+        test_ds, stats["daily_climatology"], group="dayofyear"
     )
-    # no need to minmax normalize PSC, they are already in [0, 1] (percentages)
+
+    stats["min"] = train_ds.min(dim="time")
+    stats["max"] = train_ds.max(dim="time")
+
+    train_ds = preprocessing.minmax_normalize(train_ds, stats["min"], stats["max"])
+    val_ds = preprocessing.minmax_normalize(val_ds, stats["min"], stats["max"])
+    test_ds = preprocessing.minmax_normalize(test_ds, stats["min"], stats["max"])
 
     logger.info("Creating datasets...")
     train_dataset = SpatiotemporalDataset(
         TensorDict(
-            source={key: train_ds[key].values for key in train_ds.data_vars},
+            source={"SST": train_ds.analysed_sst.values},
             batch_size=train_ds.sizes["time"],
         ),
         time=train_ds.time,
+        clouds=TensorDict(
+            source={"clouds": clouds.sel(time=train_ds.time).clouds.values},
+            batch_size=train_ds.sizes["time"],
+        ),
         time_window=config["time_window"],
     )
     test_dataset = SpatiotemporalDataset(
         TensorDict(
-            source={key: test_ds[key].values for key in test_ds.data_vars},
+            source={"SST": test_ds.analysed_sst.values},
             batch_size=test_ds.sizes["time"],
         ),
         time=test_ds.time,
+        clouds=TensorDict(
+            source={"clouds": clouds.sel(time=test_ds.time).clouds.values},
+            batch_size=test_ds.sizes["time"],
+        ),
         time_window=config["time_window"],
     )
     val_dataset = SpatiotemporalDataset(
         TensorDict(
-            source={key: val_ds[key].values for key in val_ds.data_vars},
+            source={"SST": val_ds.analysed_sst.values},
             batch_size=val_ds.sizes["time"],
         ),
         time=val_ds.time,
+        clouds=TensorDict(
+            source={"clouds": clouds.sel(time=val_ds.time).clouds.values},
+            batch_size=val_ds.sizes["time"],
+        ),
         time_window=config["time_window"],
     )
 
