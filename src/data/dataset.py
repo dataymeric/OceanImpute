@@ -52,12 +52,25 @@ class Dataset2d(Dataset):
 class Dataset3d(Dataset):
     """Dataset class explicitly treating time as a dimension."""
 
-    def __init__(self, dataset, time, time_window=8, mode="zero"):
+    def __init__(self, dataset, time, clouds=None, time_window=8, mode="zero"):
+        """
+        Args:
+            dataset (TensorDict): Dataset containing variables to impute.
+            time (np.ndarray[datetime64]): Time values (for logging purpose).
+            clouds (TensorDict, optional): Mask for missing values (1 if missing,
+                0 otherwise). Defaults: None.
+            time_window (int, optional): Time window size. Defaults: 8.
+            mode (str, optional): Filling missing values. Defaults: "zero".
+        """
         super().__init__()
         self.data = dataset
-        self.missing_mask = TensorDict(
-            source={key: torch.isnan(value) for key, value in dataset.items()},
-            batch_size=dataset.batch_size,
+        self.missing_mask = (
+            TensorDict(
+                source={key: torch.isnan(value) for key, value in dataset.items()},
+                batch_size=dataset.batch_size,
+            )
+            if clouds is None
+            else clouds
         )
         self.time = time.values.astype("datetime64[D]")
         self.time_window = time_window

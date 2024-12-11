@@ -1,5 +1,4 @@
 import logging
-import os
 from datetime import datetime
 
 import torch
@@ -16,16 +15,16 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from tensordict import TensorDict
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 import data.loading as loading
 import data.preprocessing as preprocessing
-from data.dataset import spatiotemporal_collate_fn
+from data.dataset import Dataset3d, spatiotemporal_collate_fn
 from models.loss import mse_loss
 from models.mask import random_spatial_masking, random_temporal_masking
 from models.transformers.stt import Transformer3d
-from utils.helpers import create_grid_from_3d_batch
+from utils.helpers import create_grid_from_3d_batch, early_stopping
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[RichHandler()])
 logger = logging.getLogger("rich")
@@ -90,39 +89,6 @@ wandb.init(
 logger.info(f"Using device: {device}")
 
 
-class Dataset3d(Dataset):
-    def __init__(self, dataset, clouds, time, time_window, mode="zero"):
-        super().__init__()
-        self.data = dataset
-        self.missing_mask = clouds  # 1 if missing, 0 otherwise
-        self.time = time.values.astype("datetime64[D]")
-        self.time_window = time_window
-
-        self.fill_missing(mode)
-
-    def __len__(self):
-        return len(self.data) - self.time_window + 1
-
-    def __getitem__(self, idx):
-        timerange = range(idx, idx + self.time_window)
-
-        return (
-            self.time[timerange],
-            self.data[timerange],
-            self.missing_mask[timerange],
-        )
-
-    def fill_missing(self, mode):
-        if mode == "constant":
-            for key in self.data.keys():
-                self.data[key][torch.isnan(self.data[key])] = 99999.0
-        elif mode == "zero":
-            for key in self.data.keys():
-                self.data[key][torch.isnan(self.data[key])] = 0.0
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-
-
 def run_epoch(
     model, loader, loss_fn, optimizer, device, mode="train", progress=None, task_id=None
 ):
@@ -169,47 +135,6 @@ def run_epoch(
     avg_loss = total_loss / len(loader)
 
     return avg_loss, inputs, inputs_masked, targets, outputs, time
-
-
-def early_stopping(
-    avg_val_loss,
-    best_loss,
-    patience,
-    patience_limit,
-    model,
-    optimizer,
-    scheduler,
-    epoch,
-    config,
-):
-    """Checks if early stopping criteria are met."""
-    if avg_val_loss < best_loss:
-        model_checkpoint = {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict() if scheduler else None,
-            "epoch": epoch,
-            "loss": avg_val_loss,
-            "config": {
-                key: value
-                for key, value in config.items()
-                if key not in ["datasets", "checkpoints"]
-            },
-        }
-        if config["checkpoint"]["save"]:
-            save_path = config["checkpoints"]["path"]
-            save_name = f"{save_path}/{config["checkpoints"]["name"]}.pt"
-            if not os.path.exists(save_path):
-                os.makedirs(save_path)
-            torch.save(model_checkpoint, save_name)
-        return avg_val_loss, 0  # Update best_loss and reset patience
-    else:
-        patience += 1
-        if patience > patience_limit:
-            logger.info("Early stopping...")
-            return best_loss, patience
-        else:
-            return best_loss, patience
 
 
 def log_images(
@@ -260,7 +185,7 @@ def main(
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
-    )  # Rich progress bar
+    )
 
     with progress:
         epoch_task = progress.add_task("Epoch Progress", total=config["num_epochs"])
@@ -342,6 +267,7 @@ def main(
                 scheduler,
                 epoch,
                 config,
+                logger,
             )
             if patience > config["patience"]:
                 break
@@ -397,9 +323,15 @@ if __name__ == "__main__":
 
     stats = {"daily_climatology": train_ds.groupby("time.dayofyear").mean("time")}
 
-    train_ds = preprocessing.remove_seasonality(train_ds, stats["daily_climatology"])
-    val_ds = preprocessing.remove_seasonality(val_ds, stats["daily_climatology"])
-    test_ds = preprocessing.remove_seasonality(test_ds, stats["daily_climatology"])
+    train_ds = preprocessing.remove_seasonality(
+        train_ds, stats["daily_climatology"], group="dayofyear"
+    )
+    val_ds = preprocessing.remove_seasonality(
+        val_ds, stats["daily_climatology"], group="dayofyear"
+    )
+    test_ds = preprocessing.remove_seasonality(
+        test_ds, stats["daily_climatology"], group="dayofyear"
+    )
 
     stats["min"] = train_ds.min(dim="time")
     stats["max"] = train_ds.max(dim="time")
@@ -414,11 +346,11 @@ if __name__ == "__main__":
             source={"SST": train_ds.analysed_sst.values},
             batch_size=train_ds.sizes["time"],
         ),
-        TensorDict(
+        time=train_ds.time,
+        clouds=TensorDict(
             source={"clouds": clouds.sel(time=train_ds.time).clouds.values},
             batch_size=train_ds.sizes["time"],
         ),
-        time=train_ds.time,
         time_window=config["time_window"],
     )
     test_dataset = Dataset3d(
@@ -426,11 +358,11 @@ if __name__ == "__main__":
             source={"SST": test_ds.analysed_sst.values},
             batch_size=test_ds.sizes["time"],
         ),
-        TensorDict(
+        time=test_ds.time,
+        clouds=TensorDict(
             source={"clouds": clouds.sel(time=test_ds.time).clouds.values},
             batch_size=test_ds.sizes["time"],
         ),
-        time=test_ds.time,
         time_window=config["time_window"],
     )
     val_dataset = Dataset3d(
@@ -438,11 +370,11 @@ if __name__ == "__main__":
             source={"SST": val_ds.analysed_sst.values},
             batch_size=val_ds.sizes["time"],
         ),
-        TensorDict(
+        time=val_ds.time,
+        clouds=TensorDict(
             source={"clouds": clouds.sel(time=val_ds.time).clouds.values},
             batch_size=val_ds.sizes["time"],
         ),
-        time=val_ds.time,
         time_window=config["time_window"],
     )
 

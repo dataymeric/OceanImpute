@@ -1,3 +1,5 @@
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -85,7 +87,7 @@ def create_grid_from_3d_batch(
 
 
 def to_dataset(tensor_list, time_list, variable_names, original_ds):
-    """Convert a list of tensors and corresponding time information to an 
+    """Convert a list of tensors and corresponding time information to an
     xarray Dataset.
     """
     # Concatenate tensors along the batch dimension
@@ -127,3 +129,41 @@ def to_dataset(tensor_list, time_list, variable_names, original_ds):
         )
 
     return data_ds
+
+
+def early_stopping(
+    avg_val_loss,
+    best_loss,
+    patience,
+    patience_limit,
+    model,
+    optimizer,
+    scheduler,
+    epoch,
+    config,
+    logger,
+):
+    """Checks if early stopping criteria are met."""
+    if avg_val_loss < best_loss:
+        model_checkpoint = {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler else None,
+            "epoch": epoch,
+            "loss": avg_val_loss,
+            "config": config,
+        }
+        if config["checkpoints"]["save"]:
+            save_path = config["checkpoints"]["path"]
+            save_name = f"{save_path}/{config["checkpoints"]["name"]}.pt"
+            if not os.path.exists(save_path):
+                os.makedirs(save_path)
+            torch.save(model_checkpoint, save_name)
+        return avg_val_loss, 0  # Update best_loss and reset patience
+    else:
+        patience += 1
+        if patience > patience_limit:
+            logger.info("Early stopping...")
+            return best_loss, patience
+        else:
+            return best_loss, patience

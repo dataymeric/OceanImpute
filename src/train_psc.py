@@ -1,5 +1,4 @@
 import logging
-import os
 from datetime import datetime
 
 import numpy as np
@@ -26,7 +25,7 @@ from data.dataset import Dataset3d, spatiotemporal_collate_fn
 from models.loss import mse_loss
 from models.mask import random_spatial_masking, random_temporal_masking
 from models.transformers.stt import Transformer3d
-from utils.helpers import create_grid_from_3d_batch
+from utils.helpers import create_grid_from_3d_batch, early_stopping
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[RichHandler()])
 logger = logging.getLogger("rich")
@@ -136,47 +135,6 @@ def run_epoch(
     return avg_loss, inputs_masked, inputs, outputs, time
 
 
-def early_stopping(
-    avg_val_loss,
-    best_loss,
-    patience,
-    patience_limit,
-    model,
-    optimizer,
-    scheduler,
-    epoch,
-    config,
-):
-    """Checks if early stopping criteria are met."""
-    if avg_val_loss < best_loss:
-        model_checkpoint = {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "epoch": epoch,
-            "loss": avg_val_loss,
-            "config": {
-                key: value
-                for key, value in config.items()
-                if key not in ["datasets", "periods"]
-            },
-        }
-        if config["checkpoint"]["save"]:
-            save_path = config["checkpoints"]["path"]
-            save_name = f"{save_path}/{config["checkpoints"]["name"]}.pt"
-            if not os.path.exists(save_path):
-                os.makedirs(save_path)
-            torch.save(model_checkpoint, save_name)
-        return avg_val_loss, 0  # Update best_loss and reset patience
-    else:
-        patience += 1
-        if patience > patience_limit:
-            logger.info("Early stopping...")
-            return best_loss, patience
-        else:
-            return best_loss, patience
-
-
 def log_images(
     writer,
     inputs_masked,
@@ -225,7 +183,7 @@ def main(
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
-    )  # Rich progress bar
+    )
 
     with progress:
         epoch_task = progress.add_task("Epoch Progress", total=config["num_epochs"])
@@ -307,6 +265,7 @@ def main(
                 scheduler,
                 epoch,
                 config,
+                logger,
             )
             if patience > config["patience"]:
                 break
