@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import data.loading as loading
 import data.preprocessing as preprocessing
-from data.dataset import Dataset3d, spatiotemporal_collate_fn
+from data.dataset import SpatiotemporalDataset, spatiotemporal_collate_fn
 from models.loss import mse_loss
 from models.mask import random_spatial_masking, random_temporal_masking
 from models.transformers.stt import Transformer3d
@@ -341,7 +341,7 @@ if __name__ == "__main__":
     test_ds = preprocessing.minmax_normalize(test_ds, stats["min"], stats["max"])
 
     logger.info("Creating datasets...")
-    train_dataset = Dataset3d(
+    train_dataset = SpatiotemporalDataset(
         TensorDict(
             source={"SST": train_ds.analysed_sst.values},
             batch_size=train_ds.sizes["time"],
@@ -353,7 +353,7 @@ if __name__ == "__main__":
         ),
         time_window=config["time_window"],
     )
-    test_dataset = Dataset3d(
+    test_dataset = SpatiotemporalDataset(
         TensorDict(
             source={"SST": test_ds.analysed_sst.values},
             batch_size=test_ds.sizes["time"],
@@ -365,7 +365,7 @@ if __name__ == "__main__":
         ),
         time_window=config["time_window"],
     )
-    val_dataset = Dataset3d(
+    val_dataset = SpatiotemporalDataset(
         TensorDict(
             source={"SST": val_ds.analysed_sst.values},
             batch_size=val_ds.sizes["time"],

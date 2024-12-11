@@ -4,56 +4,24 @@ from tensordict import TensorDict
 import numpy as np
 
 
-class Dataset2d(Dataset):
-    """Dataset class treating time as channels."""
+class SpatiotemporalDataset(Dataset):
+    """Dataset class designed for spatiotemporal data, specifically Xarray datasets.
 
-    def __init__(self, dataset, time_window=5, mode="zero"):
-        self.data = dataset
-        self.target = dataset["Chl"]
-        self.target_time = time_window // 2
-        self.missing_mask = torch.isnan(self.target)
-        self.time_window = time_window
-
-        self.fill_missing(mode)
-
-    def __len__(self):
-        return len(self.data) - self.time_window + 1
-
-    def __getitem__(self, idx):
-        timerange = range(idx, idx + self.time_window)
-        target_timerange = timerange[self.target_time]
-
-        target = self.target[target_timerange].unsqueeze(0)
-        missing_mask = self.missing_mask[target_timerange].unsqueeze(0)
-
-        return timerange, self.data[timerange], target, missing_mask
-
-    def fill_missing(self, mode):
-        if mode == "constant":
-            for key in self.data.keys():
-                self.data[key][torch.isnan(self.data[key])] = 99999.0
-            self.target[self.missing_mask] = 99999.0
-        elif mode == "zero":
-            for key in self.data.keys():
-                self.data[key][torch.isnan(self.data[key])] = 0.0
-            self.target[self.missing_mask] = 0.0
-        elif mode == "noise":
-            for key in self.data.keys():
-                self.data[key][torch.isnan(self.data[key])] = torch.randn_like(
-                    self.data[key][torch.isnan(self.data[key])]
-                )
-            self.target[self.missing_mask] = torch.randn_like(
-                self.target[self.missing_mask]
-            )
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-
-
-class Dataset3d(Dataset):
-    """Dataset class explicitly treating time as a dimension."""
+    Note:
+        - This class assumes that the input data is a TensorDict with the following
+        structure:
+            {
+                "var1": torch.Tensor,
+                "var2": torch.Tensor,
+                ...
+            }
+        - As of now, this requires loading the whole data in memory, which might not be
+        feasible for (very) large datasets.
+    """
 
     def __init__(self, dataset, time, clouds=None, time_window=8, mode="zero"):
-        """
+        """Initialize the dataset.
+
         Args:
             dataset (TensorDict): Dataset containing variables to impute.
             time (np.ndarray[datetime64]): Time values (for logging purpose).
@@ -90,6 +58,7 @@ class Dataset3d(Dataset):
         )
 
     def fill_missing(self, mode):
+        """Fill missing values in the dataset."""
         if mode == "constant":
             for key in self.data.keys():
                 self.data[key][torch.isnan(self.data[key])] = 99999.0
@@ -106,22 +75,26 @@ class Dataset3d(Dataset):
 
 
 def spatial_collate_fn(batch):
-    """Collate function for use with Dataset2d."""
+    """Collate function that treats time as channels.
+
+    Shape: (B, C, T, H, W) => (B, C * T, H, W)
+    """
     time = [i[0] for i in batch]
     data = [i[1] for i in batch]
-    target = [i[2] for i in batch]
-    mask = [i[3] for i in batch]
+    mask = [i[2] for i in batch]
 
+    time = np.stack(time)
     data = torch.cat(list(torch.stack(data).values()), dim=1)
-    time = torch.tensor(time)
-    target = torch.stack(target)
-    mask = torch.stack(mask)
+    mask = torch.cat(list(torch.stack(mask).values()), dim=1)
 
-    return time, data, target, mask
+    return time, data, mask
 
 
 def spatiotemporal_collate_fn(batch):
-    """Collate function for use with Dataset3d."""
+    """Collate function that explicitly treats time as a dimension.
+
+    Shape: (B, C, T, H, W)
+    """
     time = [i[0] for i in batch]
     data = [i[1] for i in batch]
     mask = [i[2] for i in batch]

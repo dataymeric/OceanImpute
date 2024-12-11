@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from data.loading import split_dataset_by_percentage
 import data.preprocessing as preprocessing
-from data.dataset import Dataset3d, spatiotemporal_collate_fn
+from data.dataset import SpatiotemporalDataset, spatiotemporal_collate_fn
 from models.transformers.stt import Transformer3d
 from utils.helpers import to_dataset
 
@@ -66,7 +66,7 @@ test_ds["Chl"] = preprocessing.minmax_normalize(
 
 # Create the test dataset
 logger.info("Creating test dataset")
-test_dataset = Dataset3d(
+test_dataset = SpatiotemporalDataset(
     TensorDict(
         source={key: torch.tensor(test_ds[key].values) for key in test_ds.data_vars},
         batch_size=test_ds.sizes["time"],
